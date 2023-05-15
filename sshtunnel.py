@@ -12,6 +12,8 @@ The connection(s) are closed when explicitly calling the
 """
 
 import os
+import random
+import string
 import sys
 import socket
 import getpass
@@ -47,7 +49,6 @@ TUNNEL_TIMEOUT = 10.0
 
 _DAEMON = True  #: Use daemon threads in connections
 _CONNECTION_COUNTER = 1
-_LOCK = threading.Lock()
 _DEPRECATIONS = {
     'ssh_address': 'ssh_address_or_host',
     'ssh_host': 'ssh_address_or_host',
@@ -253,18 +254,15 @@ def address_to_str(address):
     return str(address)
 
 
-def get_connection_id():
-    global _CONNECTION_COUNTER
-    with _LOCK:
-        uid = _CONNECTION_COUNTER
-        _CONNECTION_COUNTER += 1
-    return uid
-
-
 def _remove_none_values(dictionary):
     """ Remove dictionary keys whose value is None """
     return list(map(dictionary.pop,
                     [i for i in dictionary if dictionary[i] is None]))
+
+
+def generate_random_string(length):
+    letters = string.ascii_letters + string.digits
+    return ''.join(random.choice(letters) for _ in range(length))
 
 ########################
 #                      #
@@ -332,14 +330,15 @@ class _ForwardHandler(socketserver.BaseRequestHandler):
                     break
                 data = chan.recv(16384)
                 if self.logger.isEnabledFor(TRACE_LEVEL):
+                    hex_data = hexlify(data)
                     self.logger.log(
                         TRACE_LEVEL,
-                        '<<< IN {0} recv: {1} <<<'.format(self.info, hexlify(data))
+                        '<<< IN {0} recv: {1} <<<'.format(self.info, hex_data)
                     )
                 self.request.sendall(data)
 
     def handle(self):
-        uid = get_connection_id()
+        uid = generate_random_string(5)
         self.info = '#{0} <-- {1}'.format(uid, self.client_address or
                                           self.server.local_address)
         src_address = self.request.getpeername()
@@ -385,7 +384,8 @@ class _ForwardServer(socketserver.TCPServer):  # Not Threading
     allow_reuse_address = True  # faster rebinding
 
     def __init__(self, *args, **kwargs):
-        self.logger = create_logger(kwargs.pop('logger', None))
+        logger = kwargs.pop('logger', None)
+        self.logger = logger or create_logger()
         self.tunnel_ok = queue.Queue(1)
         socketserver.TCPServer.__init__(self, *args, **kwargs)
 
@@ -444,7 +444,8 @@ class _StreamForwardServer(_StreamServer):
     """
 
     def __init__(self, *args, **kwargs):
-        self.logger = create_logger(kwargs.pop('logger', None))
+        logger = kwargs.pop('logger', None)
+        self.logger = logger or create_logger()
         self.tunnel_ok = queue.Queue(1)
         _StreamServer.__init__(self, *args, **kwargs)
 
@@ -904,9 +905,6 @@ class SSHTunnelForwarder(object):
             **kwargs  # for backwards compatibility
     ):
         self.logger = logger or create_logger()
-
-        # Ensure paramiko.transport has a console handler
-        _check_paramiko_handlers(logger=logger)
 
         self.ssh_host_key = ssh_host_key
         self.set_keepalive = set_keepalive
@@ -1668,8 +1666,9 @@ def open_tunnel(*args, **kwargs):
             do_something(server.local_bind_port)
     """
     # Attach a console handler to the logger or create one if not passed
-    kwargs['logger'] = create_logger(logger=kwargs.get('logger', None),
-                                     loglevel=kwargs.pop('debug_level', None))
+    loglevel = kwargs.pop('debug_level', None)
+    logger = kwargs.get('logger', None) or create_logger(loglevel=loglevel)
+    kwargs['logger'] = logger
 
     ssh_address_or_host = kwargs.pop('ssh_address_or_host', None)
     # Check if deprecated arguments ssh_address or ssh_host were used
